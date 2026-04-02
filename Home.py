@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 # Cache version bump: increment when cached data structure changes
-_CACHE_VERSION = "v5"
+_CACHE_VERSION = "v6"
 if st.session_state.get("cache_version") != _CACHE_VERSION:
     from modules.cache import cache
     cache.clear_all()

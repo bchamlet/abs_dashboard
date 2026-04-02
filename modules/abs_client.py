@@ -318,26 +318,38 @@ def filter_dataframe(
     Filter a full 'all' DataFrame to match the user's dimension selections.
 
     dim_selections: {dim_id → code_id}
-    Matches against human-readable dimension name columns already present in df.
-    Falls back to the dimension ID as column name when the structure name doesn't
-    match (can happen if the serieskeysonly probe failed and XML names were used).
+
+    Prefers filtering by the raw code-ID columns (_code_{dim_id}) stored during
+    parsing — an exact match that bypasses any human-readable string differences
+    between the probe and data responses.  Falls back to name-based matching for
+    Parquet files built before the _code_ columns were introduced.
+
+    The _code_ columns are dropped before returning so callers only see display columns.
     """
     for dim in structure.get("dimensions", []):
         code_id = dim_selections.get(dim["id"])
         if not code_id:
             continue
-        # Resolve column name: prefer structure name, fall back to dim ID
-        col_name = dim.get("name", dim["id"])
-        if col_name not in df.columns:
-            col_name = dim["id"]
-        if col_name not in df.columns:
-            continue
-        code_name = next(
-            (c["name"] for c in dim.get("codes", []) if c["id"] == code_id), None
-        )
-        if code_name:
-            df = df[df[col_name] == code_name]
-    return df.reset_index(drop=True)
+
+        id_col = f"_code_{dim['id']}"
+        if id_col in df.columns:
+            df = df[df[id_col] == code_id]
+        else:
+            # Fallback: name-based matching
+            col_name = dim.get("name", dim["id"])
+            if col_name not in df.columns:
+                col_name = dim["id"]
+            if col_name not in df.columns:
+                continue
+            code_name = next(
+                (c["name"] for c in dim.get("codes", []) if c["id"] == code_id), None
+            )
+            if code_name:
+                df = df[df[col_name] == code_name]
+
+    # Drop internal _code_ columns — not needed by callers
+    drop = [c for c in df.columns if c.startswith("_code_")]
+    return df.drop(columns=drop).reset_index(drop=True)
 
 
 def _sdmx_structure(data: dict) -> dict:
@@ -377,10 +389,14 @@ def _parse_observations(data: dict) -> pd.DataFrame:
             for i, dim in enumerate(dimensions):
                 if i < len(key_parts):
                     idx = int(key_parts[i])
-                    dim_name = _get_en_name(dim.get("name", {})) or dim.get("id", f"dim{i}")
-                    codes = dim.get("values", [])
-                    code_name = _get_en_name(codes[idx].get("name", {})) if idx < len(codes) else str(idx)
-                    dim_values[dim_name] = code_name
+                    dim_id      = dim.get("id", f"dim{i}")
+                    dim_name    = _get_en_name(dim.get("name", {})) or dim_id
+                    codes       = dim.get("values", [])
+                    code_entry  = codes[idx] if idx < len(codes) else {}
+                    code_id_val = code_entry.get("id", str(idx))
+                    code_name   = _get_en_name(code_entry.get("name", {})) if code_entry else str(idx)
+                    dim_values[dim_name]          = code_name    # human-readable (display)
+                    dim_values[f"_code_{dim_id}"] = code_id_val  # raw ID (filtering)
 
             observations = series_obj.get("observations", {})
             for obs_key_str, obs_values in observations.items():
