@@ -18,7 +18,8 @@ st.caption("Manage the datasets cached locally. Refresh to pull the latest data 
 # ---------------------------------------------------------------------------
 
 def _format_ts(ts: int) -> str:
-    return datetime.fromtimestamp(ts).strftime("%-d %b %Y %H:%M")
+    dt = datetime.fromtimestamp(ts)
+    return f"{dt.day} {dt.strftime('%b %Y %H:%M')}"
 
 
 def _catalog_by_dataflow(entries: list[dict]) -> dict[str, dict]:
