@@ -145,8 +145,7 @@ def _filter_codes_by_data(structure: dict, probe_data: dict) -> dict:
     Also applies the FREQ allowlist to the FREQ dimension.
     """
     try:
-        data_obj = probe_data.get("data", {})
-        sdmx_structure = data_obj.get("structure") or (data_obj.get("structures") or [{}])[0]
+        sdmx_structure = _sdmx_structure(probe_data)
         series_dims = sdmx_structure.get("dimensions", {}).get("series", [])
         if not series_dims:
             return _apply_freq_allowlist(structure)
@@ -337,16 +336,33 @@ def filter_dataframe(
     return df.reset_index(drop=True)
 
 
+def _sdmx_structure(data: dict) -> dict:
+    """
+    Locate the SDMX structure object from a JSON data response.
+
+    ABS SDMX-JSON v2.0 puts the structure at the TOP LEVEL as data["structures"][0].
+    Older / other implementations put it inside data["data"]["structure"] (v1.0)
+    or data["data"]["structures"][0] (v2.0 non-ABS).
+    """
+    data_obj = data.get("data", {})
+    return (
+        (data.get("structures") or [{}])[0]         # ABS v2.0 — top-level
+        or data_obj.get("structure")                 # v1.0 — inside data
+        or (data_obj.get("structures") or [{}])[0]  # v2.0 other — inside data
+    )
+
+
 def _parse_observations(data: dict) -> pd.DataFrame:
     """Parse SDMX-JSON data response into a tidy DataFrame.
 
-    Handles both SDMX-JSON v1.0 (data.structure) and v2.0 (data.structures[]).
+    Handles ABS SDMX-JSON v2.0 (top-level structures[]), v1.0 (data.structure),
+    and v2.0 non-ABS (data.structures[]).
     """
     rows = []
     try:
         data_obj = data.get("data", {})
         dataset = data_obj.get("dataSets", [{}])[0]
-        structure = data_obj.get("structure") or (data_obj.get("structures") or [{}])[0]
+        structure = _sdmx_structure(data)
         dimensions = structure.get("dimensions", {}).get("series", [])
         obs_dims = structure.get("dimensions", {}).get("observation", [])
         series_data = dataset.get("series", {})
