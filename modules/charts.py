@@ -135,10 +135,9 @@ def correlation_chart(
     fig.update_layout(
         title=title,
         xaxis=dict(title="Period"),
-        yaxis=dict(title=labels[0], titlefont=dict(color="#1f77b4")),
+        yaxis=dict(title=dict(text=labels[0], font=dict(color="#1f77b4"))),
         yaxis2=dict(
-            title=labels[1],
-            titlefont=dict(color="#d62728"),
+            title=dict(text=labels[1], font=dict(color="#d62728")),
             overlaying="y",
             side="right",
         ),
