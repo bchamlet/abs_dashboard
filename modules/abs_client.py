@@ -151,16 +151,25 @@ def _filter_codes_by_data(structure: dict, probe_data: dict) -> dict:
         if not series_dims:
             return _apply_freq_allowlist(structure)
 
-        live_codes: dict[str, list[dict]] = {}
+        # Build lookup: dim_id -> {json_name, codes}
+        # The JSON name is what _parse_observations uses for DataFrame columns,
+        # so we must use it in the structure too to ensure filter_dataframe can match.
+        live_dims: dict[str, dict] = {}
         for dim in series_dims:
             dim_id = dim.get("id", "")
+            dim_name = _get_en_name(dim.get("name", {})) or dim_id
             values = dim.get("values", [])
-            live_codes[dim_id] = [{"id": v.get("id", ""), "name": _get_en_name(v.get("name", {}))} for v in values]
+            live_dims[dim_id] = {
+                "name": dim_name,
+                "codes": [{"id": v.get("id", ""), "name": _get_en_name(v.get("name", {}))} for v in values],
+            }
 
         updated_dims = []
         for dim in structure["dimensions"]:
-            if dim["id"] in live_codes and live_codes[dim["id"]]:
-                updated_dims.append({**dim, "codes": live_codes[dim["id"]]})
+            if dim["id"] in live_dims and live_dims[dim["id"]]["codes"]:
+                live = live_dims[dim["id"]]
+                # Update both name (from JSON — matches DataFrame columns) and filtered codes
+                updated_dims.append({**dim, "name": live["name"], "codes": live["codes"]})
             else:
                 updated_dims.append(dim)
         return _apply_freq_allowlist({"dimensions": updated_dims})
@@ -307,16 +316,23 @@ def filter_dataframe(
 
     dim_selections: {dim_id → code_id}
     Matches against human-readable dimension name columns already present in df.
+    Falls back to the dimension ID as column name when the structure name doesn't
+    match (can happen if the serieskeysonly probe failed and XML names were used).
     """
     for dim in structure.get("dimensions", []):
         code_id = dim_selections.get(dim["id"])
         if not code_id:
             continue
+        # Resolve column name: prefer structure name, fall back to dim ID
         col_name = dim.get("name", dim["id"])
+        if col_name not in df.columns:
+            col_name = dim["id"]
+        if col_name not in df.columns:
+            continue
         code_name = next(
             (c["name"] for c in dim.get("codes", []) if c["id"] == code_id), None
         )
-        if code_name and col_name in df.columns:
+        if code_name:
             df = df[df[col_name] == code_name]
     return df.reset_index(drop=True)
 
