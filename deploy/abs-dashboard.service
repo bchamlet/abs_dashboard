@@ -1,0 +1,18 @@
+[Unit]
+Description=ABS Data Explorer (Streamlit)
+After=network.target
+
+[Service]
+Type=simple
+User=absapp
+WorkingDirectory=/opt/abs_dashboard
+ExecStart=/opt/abs_dashboard/venv/bin/streamlit run Home.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/abs_dashboard/.env
+
+[Install]
+WantedBy=multi-user.target
