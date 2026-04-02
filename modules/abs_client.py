@@ -281,7 +281,11 @@ def get_observations(
     if not force_refresh:
         cached_df = cache.get_df(cache_key)
         if cached_df is not None:
-            return cached_df
+            # Invalidate Parquet files built before dimension columns were added.
+            # A valid file always has more columns than just time_period + value.
+            if set(cached_df.columns) - {"time_period", "value"}:
+                return cached_df
+            cache.catalog_invalidate(cache_key)  # stale — re-fetch below
 
     params: dict = {
         "detail": "full",

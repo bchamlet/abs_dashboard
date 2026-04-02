@@ -117,6 +117,14 @@ st.caption(
     "To extend the date range, visit the **Data** tab."
 )
 
+if st.session_state.get("debug_mode"):
+    st.info(
+        f"**DataFrame columns:** `{list(df_all.columns)}`\n\n"
+        f"**Total rows (unfiltered):** {len(df_all):,}\n\n"
+        f"**Rows after dimension filter:** {len(df_filtered):,}\n\n"
+        f"**Dimension selections:** `{dim_selections}`"
+    )
+
 df = df_filtered[df_filtered["time_period"].dt.year.between(int(start_year), int(end_year))].copy()
 
 if df.empty:
