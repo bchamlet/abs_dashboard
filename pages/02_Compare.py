@@ -5,7 +5,7 @@ import streamlit as st
 
 from modules.search import find_matching_datasets
 from modules.metadata import get_dataflow_version
-from modules.abs_client import get_structure, get_observations
+from modules.abs_client import get_structure, get_observations, filter_dataframe
 from modules.analytics import correlate
 from modules.charts import correlation_chart, to_csv_bytes, to_png_bytes
 
@@ -57,24 +57,34 @@ def _dataset_selector(prefix: str, label: str):
             )
             dim_selections[dim["id"]] = options_map[chosen_code]
 
-    data_key = (
-        ".".join(dim_selections[d["id"]] for d in dimensions if d["id"] in dim_selections)
-        if dim_selections else "all"
-    )
-
-    col_s, col_e = st.columns(2)
-    start = str(int(col_s.number_input("Start year", 1950, 2025, 2010, key=f"{prefix}_start")))
-    end = str(int(col_e.number_input("End year", 1950, 2025, 2025, key=f"{prefix}_end")))
-
     with st.spinner("Fetching data..."):
         try:
-            df = get_observations(dataflow_id, version, data_key, start, end)
+            df_all = get_observations(dataflow_id, version, dataflow_name=chosen["name"])
         except Exception as e:
             st.error(f"Error: {e}")
             return None, None
 
-    if df.empty:
+    if df_all.empty:
         st.warning("No data returned.")
+        return None, None
+
+    df = filter_dataframe(df_all, structure, dim_selections)
+
+    if df.empty:
+        st.warning("No data matched the selected dimension combination. Try adjusting the filters.")
+        return None, None
+
+    cached_min = int(df_all["time_period"].dt.year.min())
+    cached_max = int(df_all["time_period"].dt.year.max())
+    col_s, col_e = st.columns(2)
+    start = int(col_s.number_input("Start year", cached_min, cached_max, cached_min, key=f"{prefix}_start"))
+    end = int(col_e.number_input("End year", cached_min, cached_max, cached_max, key=f"{prefix}_end"))
+    st.caption(f"Cached data covers {cached_min}–{cached_max}. Extend on the **Data** tab.")
+
+    df = df[df["time_period"].dt.year.between(start, end)].copy()
+
+    if df.empty:
+        st.warning("No data in the selected date range.")
         return None, None
 
     return df, chosen["name"]

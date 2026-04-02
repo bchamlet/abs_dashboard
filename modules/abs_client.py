@@ -2,16 +2,19 @@
 ABS SDMX REST API client.
 
 - Metadata endpoints (dataflows, structures) return XML — parsed with ElementTree.
-- Data observation endpoint supports JSON via format=jsondata query param.
-- All public methods check the SQLite cache before making HTTP requests.
+- Data observation endpoint supports JSON via Accept: application/vnd.sdmx.data+json.
+- Observations are always fetched with data_key=all and cached as Parquet files.
+- All public methods check the SQLite/Parquet cache before making HTTP requests.
 """
 import json
 import xml.etree.ElementTree as ET
-import httpx
-import pandas as pd
+from datetime import datetime
 from typing import Optional
 
-from config import ABS_BASE_URL, METADATA_TTL_HOURS, DATA_TTL_HOURS
+import httpx
+import pandas as pd
+
+from config import ABS_BASE_URL, METADATA_TTL_HOURS, DATA_TTL_HOURS, FETCH_YEARS_DEFAULT
 from modules.cache import cache
 
 # SDMX 2.1 XML namespaces
@@ -69,7 +72,6 @@ def _parse_dataflows_xml(root: ET.Element) -> list[dict]:
         if not df_id:
             continue
 
-        # Name: prefer xml:lang="en", fall back to first Name element text
         name = ""
         description = ""
         for name_elem in df_elem.findall(f"{{{ns_common}}}Name"):
@@ -109,26 +111,22 @@ def get_structure(dataflow_id: str, version: str = "1.0.0") -> dict:
     if cached is not None:
         return _apply_freq_allowlist(cached)
 
-    # Step 1: full DSD for dimension names, order, and complete codelists
     dsd_url = f"{ABS_BASE_URL}/rest/datastructure/ABS/{dataflow_id}/{version}"
     root = _get_xml(dsd_url, params={"references": "all", "detail": "full"})
     structure = _parse_structure_xml(root)
 
-    # Step 2: probe the data endpoint with serieskeysonly to get the filtered
-    # dimension value lists that actually have data in this specific flow.
     try:
         data_url = f"{ABS_BASE_URL}/rest/data/ABS,{dataflow_id},{version}/all"
         probe = _get_json(data_url, params={"detail": "serieskeysonly", "dimensionAtObservation": "TIME_PERIOD"})
         structure = _filter_codes_by_data(structure, probe)
     except Exception:
-        structure = _apply_freq_allowlist(structure)  # still filter even without probe
+        structure = _apply_freq_allowlist(structure)
 
     cache.set(cache_key, structure, METADATA_TTL_HOURS)
     return structure
 
 
 # Allowed FREQ codes with user-friendly display names.
-# Any code not in this map is excluded from the dimension selector.
 _FREQ_ALLOWLIST: dict[str, str] = {
     "D": "Daily",
     "W": "Weekly",
@@ -148,20 +146,17 @@ def _filter_codes_by_data(structure: dict, probe_data: dict) -> dict:
     """
     try:
         data_obj = probe_data.get("data", {})
-        # v2.0 uses "structures" (list); v1.0 uses "structure" (dict)
         sdmx_structure = data_obj.get("structure") or (data_obj.get("structures") or [{}])[0]
         series_dims = sdmx_structure.get("dimensions", {}).get("series", [])
         if not series_dims:
             return _apply_freq_allowlist(structure)
 
-        # Build lookup: dimension id -> [{id, name}, ...] (already filtered by API)
         live_codes: dict[str, list[dict]] = {}
         for dim in series_dims:
             dim_id = dim.get("id", "")
             values = dim.get("values", [])
             live_codes[dim_id] = [{"id": v.get("id", ""), "name": _get_en_name(v.get("name", {}))} for v in values]
 
-        # Overwrite codes in structure where we have live data
         updated_dims = []
         for dim in structure["dimensions"]:
             if dim["id"] in live_codes and live_codes[dim["id"]]:
@@ -196,7 +191,6 @@ def _parse_structure_xml(root: ET.Element) -> dict:
     ns_struct = _NS["structure"]
     ns_common = _NS["common"]
 
-    # 1. Build codelist lookup: {codelist_id: [{id, name}, ...]}
     codelists: dict[str, list[dict]] = {}
     for cl_elem in root.iter(f"{{{ns_struct}}}Codelist"):
         cl_id = cl_elem.get("id", "")
@@ -207,14 +201,12 @@ def _parse_structure_xml(root: ET.Element) -> dict:
             codes.append({"id": code_id, "name": code_name})
         codelists[cl_id] = codes
 
-    # 2. Extract dimensions from DimensionList
     dimensions = []
     for dim_elem in root.iter(f"{{{ns_struct}}}Dimension"):
         dim_id = dim_elem.get("id", "")
         position = int(dim_elem.get("position", 99))
         dim_name = _xml_en_name(dim_elem, ns_common) or dim_id
 
-        # Resolve codelist reference via LocalRepresentation > Enumeration > Ref
         cl_ref_id = ""
         local_rep = dim_elem.find(f"{{{ns_struct}}}LocalRepresentation")
         if local_rep is not None:
@@ -228,7 +220,6 @@ def _parse_structure_xml(root: ET.Element) -> dict:
         dimensions.append({"id": dim_id, "name": dim_name, "position": position, "codes": codes})
 
     dimensions.sort(key=lambda d: d["position"])
-    # Remove internal position key before returning
     for d in dimensions:
         d.pop("position", None)
 
@@ -255,42 +246,79 @@ def _xml_en_name(elem: ET.Element, ns_common: str) -> str:
 def get_observations(
     dataflow_id: str,
     version: str,
-    data_key: str = "all",
     start_period: Optional[str] = None,
     end_period: Optional[str] = None,
+    dataflow_name: Optional[str] = None,
+    force_refresh: bool = False,
+    is_warm_cache: bool = False,
 ) -> pd.DataFrame:
     """
-    Fetch data observations and return as a Pandas DataFrame with columns:
+    Fetch ALL observations for a dataflow and return as a Pandas DataFrame:
     [time_period, value, <dimension columns>]
 
-    Cached for DATA_TTL_HOURS.
+    Always fetches data_key=all from the ABS API. Dimension filtering is done
+    locally by the caller using filter_dataframe().
+
+    Defaults to the last FETCH_YEARS_DEFAULT years if no period is specified.
+    Cached as a Parquet file for DATA_TTL_HOURS.
     """
-    cache_key = f"obs:{dataflow_id}:{version}:{data_key}:{start_period}:{end_period}"
-    cached = cache.get(cache_key)
-    if cached is not None:
-        df = pd.DataFrame(cached)
-        if "time_period" in df.columns:
-            df["time_period"] = pd.to_datetime(df["time_period"], errors="coerce")
-        return df
+    current_year = datetime.now().year
+    if start_period is None:
+        start_period = str(current_year - FETCH_YEARS_DEFAULT)
+    if end_period is None:
+        end_period = str(current_year)
 
-    params: dict = {"detail": "full", "dimensionAtObservation": "TIME_PERIOD"}
-    if start_period:
-        params["startPeriod"] = start_period
-    if end_period:
-        params["endPeriod"] = end_period
+    cache_key = f"obs:{dataflow_id}:{version}:{start_period}:{end_period}"
 
-    url = f"{ABS_BASE_URL}/rest/data/ABS,{dataflow_id},{version}/{data_key}"
+    if not force_refresh:
+        cached_df = cache.get_df(cache_key)
+        if cached_df is not None:
+            return cached_df
+
+    params: dict = {
+        "detail": "full",
+        "dimensionAtObservation": "TIME_PERIOD",
+        "startPeriod": start_period,
+        "endPeriod": end_period,
+    }
+    url = f"{ABS_BASE_URL}/rest/data/ABS,{dataflow_id},{version}/all"
     data = _get_json(url, params=params)
     df = _parse_observations(data)
 
-    # Serialise time_period as ISO strings so json.dumps can handle them
-    serialisable = df.copy()
-    if "time_period" in serialisable.columns:
-        serialisable["time_period"] = serialisable["time_period"].apply(
-            lambda t: t.isoformat() if pd.notna(t) else None
-        )
-    cache.set(cache_key, serialisable.to_dict(orient="records"), DATA_TTL_HOURS)
+    meta = {
+        "dataflow_id": dataflow_id,
+        "dataflow_name": dataflow_name or dataflow_id,
+        "version": version,
+        "start_period": start_period,
+        "end_period": end_period,
+        "is_warm_cache": is_warm_cache,
+    }
+    cache.set_df(cache_key, df, DATA_TTL_HOURS, meta)
     return df
+
+
+def filter_dataframe(
+    df: pd.DataFrame,
+    structure: dict,
+    dim_selections: dict[str, str],
+) -> pd.DataFrame:
+    """
+    Filter a full 'all' DataFrame to match the user's dimension selections.
+
+    dim_selections: {dim_id → code_id}
+    Matches against human-readable dimension name columns already present in df.
+    """
+    for dim in structure.get("dimensions", []):
+        code_id = dim_selections.get(dim["id"])
+        if not code_id:
+            continue
+        col_name = dim.get("name", dim["id"])
+        code_name = next(
+            (c["name"] for c in dim.get("codes", []) if c["id"] == code_id), None
+        )
+        if code_name and col_name in df.columns:
+            df = df[df[col_name] == code_name]
+    return df.reset_index(drop=True)
 
 
 def _parse_observations(data: dict) -> pd.DataFrame:
@@ -301,15 +329,10 @@ def _parse_observations(data: dict) -> pd.DataFrame:
     rows = []
     try:
         data_obj = data.get("data", {})
-
         dataset = data_obj.get("dataSets", [{}])[0]
-
-        # v2.0 uses "structures" (list); v1.0 uses "structure" (dict)
         structure = data_obj.get("structure") or (data_obj.get("structures") or [{}])[0]
-
         dimensions = structure.get("dimensions", {}).get("series", [])
         obs_dims = structure.get("dimensions", {}).get("observation", [])
-
         series_data = dataset.get("series", {})
 
         for series_key_str, series_obj in series_data.items():
@@ -329,8 +352,7 @@ def _parse_observations(data: dict) -> pd.DataFrame:
                 time_values = obs_dims[0].get("values", []) if obs_dims else []
                 time_period = time_values[obs_idx].get("id", "") if obs_idx < len(time_values) else obs_key_str
                 value = obs_values[0] if obs_values else None
-                row = {"time_period": time_period, "value": value, **dim_values}
-                rows.append(row)
+                rows.append({"time_period": time_period, "value": value, **dim_values})
     except Exception:
         pass
 
@@ -347,36 +369,27 @@ def _parse_observations(data: dict) -> pd.DataFrame:
 def _parse_sdmx_period(period: str) -> pd.Timestamp:
     """
     Convert ABS/SDMX period strings to a Timestamp.
-    Handles: 2024-Q1, 2024Q1, 2024-S1, 2024-01..2024-12, 2024, 2024-01-01
+    Handles: 2024-01-01, 2024-Q1, 2024Q1, 2024-S1, 2024-01..2024-12, 2024
     """
     import re
     if not isinstance(period, str):
         return pd.NaT
     period = period.strip()
-    # Full date: 2024-01-01
     m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", period)
     if m:
         return pd.Timestamp(year=int(m.group(1)), month=int(m.group(2)), day=int(m.group(3)))
-    # Quarterly with hyphen: 2024-Q1
     m = re.fullmatch(r"(\d{4})-Q([1-4])", period)
     if m:
-        month = (int(m.group(2)) - 1) * 3 + 1
-        return pd.Timestamp(year=int(m.group(1)), month=month, day=1)
-    # Quarterly without hyphen: 2024Q1
+        return pd.Timestamp(year=int(m.group(1)), month=(int(m.group(2)) - 1) * 3 + 1, day=1)
     m = re.fullmatch(r"(\d{4})Q([1-4])", period)
     if m:
-        month = (int(m.group(2)) - 1) * 3 + 1
-        return pd.Timestamp(year=int(m.group(1)), month=month, day=1)
-    # Half-yearly: 2024-S1 / 2024-S2
+        return pd.Timestamp(year=int(m.group(1)), month=(int(m.group(2)) - 1) * 3 + 1, day=1)
     m = re.fullmatch(r"(\d{4})-S([12])", period)
     if m:
-        month = 1 if m.group(2) == "1" else 7
-        return pd.Timestamp(year=int(m.group(1)), month=month, day=1)
-    # Monthly: 2024-01
+        return pd.Timestamp(year=int(m.group(1)), month=1 if m.group(2) == "1" else 7, day=1)
     m = re.fullmatch(r"(\d{4})-(\d{2})", period)
     if m:
         return pd.Timestamp(year=int(m.group(1)), month=int(m.group(2)), day=1)
-    # Annual: 2024
     m = re.fullmatch(r"(\d{4})", period)
     if m:
         return pd.Timestamp(year=int(m.group(1)), month=1, day=1)

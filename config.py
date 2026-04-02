@@ -8,6 +8,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 METADATA_TTL_HOURS = 24
 DATA_TTL_HOURS = 6
+FETCH_YEARS_DEFAULT = 5
 
 # Pre-cached datasets for v1; add IDs here to warm cache on startup
 V1_DATASETS = ["CPI", "LF"]

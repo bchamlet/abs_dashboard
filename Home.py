@@ -46,6 +46,7 @@ pg = st.navigation([
     st.Page("pages/01_Explore.py",   title="Explore", icon=":material/search:"),
     st.Page("pages/02_Compare.py",   title="Compare", icon=":material/compare_arrows:"),
     st.Page("pages/03_Forecast.py",  title="Forecast", icon=":material/trending_up:"),
+    st.Page("pages/04_Data.py",      title="Data",    icon=":material/database:"),
 ])
 render_common_sidebar()
 pg.run()

@@ -6,7 +6,7 @@ import pandas as pd
 
 from modules.search import find_matching_datasets
 from modules.metadata import get_dataflow_version
-from modules.abs_client import get_structure, get_observations
+from modules.abs_client import get_structure, get_observations, filter_dataframe
 from modules.analytics import detect_anomalies
 from modules.charts import line_chart, to_csv_bytes, to_png_bytes
 
@@ -69,58 +69,63 @@ for i, dim in enumerate(dimensions):
         continue
     col = cols[i % len(cols)] if cols else st.container()
     options_map = {c["name"]: c["id"] for c in codes}
-    # Default to first option
     chosen_name = col.selectbox(dim["name"], list(options_map.keys()), key=f"dim_{dim['id']}")
     dim_selections[dim["id"]] = options_map[chosen_name]
 
-# Build data key from selections (ordered by dimension position)
-if dim_selections:
-    data_key = ".".join(dim_selections[d["id"]] for d in dimensions if d["id"] in dim_selections)
-else:
-    data_key = "all"
-
 # ---------------------------------------------------------------------------
-# Step 4: Date range
+# Step 4: Fetch full dataset (cached) then filter locally
 # ---------------------------------------------------------------------------
-st.subheader("Date range")
-col_s, col_e = st.columns(2)
-start_year = col_s.number_input("Start year", min_value=1950, max_value=2025, value=2010, step=1)
-end_year = col_e.number_input("End year", min_value=1950, max_value=2025, value=2025, step=1)
-start_period = str(int(start_year))
-end_period = str(int(end_year))
-
-# ---------------------------------------------------------------------------
-# Step 5: Fetch & display
-# ---------------------------------------------------------------------------
-from config import ABS_BASE_URL
-
-_obs_url = f"{ABS_BASE_URL}/rest/data/ABS,{dataflow_id},{version}/{data_key}"
-_obs_params = {
-    "detail": "full",
-    "dimensionAtObservation": "TIME_PERIOD",
-    "startPeriod": start_period,
-    "endPeriod": end_period,
-}
-
-if st.session_state.get("debug_mode"):
-    st.info(
-        f"**Endpoint:** `{_obs_url}`\n\n"
-        f"**Params:** `{_obs_params}`\n\n"
-        f"**Full URL:** `{_obs_url}?{'&'.join(f'{k}={v}' for k, v in _obs_params.items())}`"
-    )
-
 with st.spinner("Fetching data from ABS..."):
     try:
-        df = get_observations(dataflow_id, version, data_key, start_period, end_period)
+        df_all = get_observations(dataflow_id, version, dataflow_name=selected["name"])
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         st.stop()
 
-if df.empty:
-    st.warning("No data returned for this selection. Try adjusting the filters or date range.")
+if df_all.empty:
+    st.warning("No data returned for this dataset. Try a different selection.")
     st.stop()
 
-# Sidebar options
+# Apply dimension filter
+df_filtered = filter_dataframe(df_all, structure, dim_selections)
+
+if df_filtered.empty:
+    st.warning(
+        "No data matched the selected dimension combination. "
+        "Try adjusting the filters above."
+    )
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Step 5: Date range — local filter on cached data
+# ---------------------------------------------------------------------------
+st.subheader("Date range")
+cached_min = int(df_all["time_period"].dt.year.min())
+cached_max = int(df_all["time_period"].dt.year.max())
+
+col_s, col_e = st.columns(2)
+start_year = col_s.number_input(
+    "Start year", min_value=cached_min, max_value=cached_max,
+    value=cached_min, step=1,
+)
+end_year = col_e.number_input(
+    "End year", min_value=cached_min, max_value=cached_max,
+    value=cached_max, step=1,
+)
+st.caption(
+    f"Cached data covers {cached_min}–{cached_max}. "
+    "To extend the date range, visit the **Data** tab."
+)
+
+df = df_filtered[df_filtered["time_period"].dt.year.between(int(start_year), int(end_year))].copy()
+
+if df.empty:
+    st.warning("No data in the selected date range.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Step 6: Chart
+# ---------------------------------------------------------------------------
 with st.sidebar:
     st.subheader("Chart options")
     show_anomalies = st.toggle("Highlight anomalies", value=False)
@@ -128,7 +133,7 @@ with st.sidebar:
 
 anomalies_df = detect_anomalies(df) if show_anomalies else None
 
-chart_title = f"{selected['name']} ({start_period}–{end_period})"
+chart_title = f"{selected['name']} ({int(start_year)}–{int(end_year)})"
 fig = line_chart(df, title=chart_title, anomalies=anomalies_df)
 st.plotly_chart(fig, width='stretch')
 
@@ -149,7 +154,7 @@ with col_csv:
     st.download_button(
         "Download CSV",
         data=to_csv_bytes(df),
-        file_name=f"{dataflow_id}_{start_period}_{end_period}.csv",
+        file_name=f"{dataflow_id}_{int(start_year)}_{int(end_year)}.csv",
         mime="text/csv",
     )
 with col_png:
@@ -158,7 +163,7 @@ with col_png:
         st.download_button(
             "Download PNG",
             data=png,
-            file_name=f"{dataflow_id}_{start_period}_{end_period}.png",
+            file_name=f"{dataflow_id}_{int(start_year)}_{int(end_year)}.png",
             mime="image/png",
         )
     except Exception:

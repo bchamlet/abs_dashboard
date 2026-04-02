@@ -5,7 +5,7 @@ import streamlit as st
 
 from modules.search import find_matching_datasets
 from modules.metadata import get_dataflow_version
-from modules.abs_client import get_structure, get_observations
+from modules.abs_client import get_structure, get_observations, filter_dataframe
 from modules.analytics import forecast
 from modules.charts import forecast_chart, to_csv_bytes, to_png_bytes
 
@@ -63,34 +63,49 @@ if dimensions:
         )
         dim_selections[dim["id"]] = options_map[chosen_code]
 
-data_key = (
-    ".".join(dim_selections[d["id"]] for d in dimensions if d["id"] in dim_selections)
-    if dim_selections else "all"
-)
+# ---------------------------------------------------------------------------
+# Fetch full dataset (cached) then filter locally
+# ---------------------------------------------------------------------------
+with st.spinner("Fetching historical data..."):
+    try:
+        df_all = get_observations(dataflow_id, version, dataflow_name=chosen["name"])
+    except Exception as e:
+        st.error(f"Error fetching data: {e}")
+        st.stop()
+
+if df_all.empty:
+    st.warning("No data returned. Try a different dataset.")
+    st.stop()
+
+df_filtered = filter_dataframe(df_all, structure, dim_selections)
+
+if df_filtered.empty:
+    st.warning("No data matched the selected dimension combination. Try adjusting the filters.")
+    st.stop()
 
 # ---------------------------------------------------------------------------
 # Forecast settings
 # ---------------------------------------------------------------------------
 st.subheader("Forecast settings")
+cached_min = int(df_all["time_period"].dt.year.min())
+cached_max = int(df_all["time_period"].dt.year.max())
+
 col_s, col_e, col_p, col_m = st.columns(4)
-start = str(int(col_s.number_input("Historical start year", 1950, 2025, 2000, step=1)))
-end = str(int(col_e.number_input("Historical end year", 1950, 2025, 2025, step=1)))
+start = int(col_s.number_input("Historical start year", cached_min, cached_max, cached_min, step=1))
+end = int(col_e.number_input("Historical end year", cached_min, cached_max, cached_max, step=1))
 periods = col_p.number_input("Periods to forecast", min_value=1, max_value=40, value=8)
 method_label = col_m.selectbox("Method", ["Linear regression", "LSTM (neural network)"])
 method = "linear" if "Linear" in method_label else "lstm"
 
-# ---------------------------------------------------------------------------
-# Fetch & forecast
-# ---------------------------------------------------------------------------
-with st.spinner("Fetching historical data..."):
-    try:
-        df = get_observations(dataflow_id, version, data_key, start, end)
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        st.stop()
+st.caption(
+    f"Cached data covers {cached_min}–{cached_max}. "
+    "To extend the date range, visit the **Data** tab."
+)
+
+df = df_filtered[df_filtered["time_period"].dt.year.between(start, end)].copy()
 
 if df.empty:
-    st.warning("No data returned. Adjust filters or date range.")
+    st.warning("No data in the selected date range.")
     st.stop()
 
 if method == "lstm" and len(df.dropna()) < 50:
@@ -100,6 +115,9 @@ if method == "lstm" and len(df.dropna()) < 50:
     )
     method = "linear"
 
+# ---------------------------------------------------------------------------
+# Run forecast
+# ---------------------------------------------------------------------------
 with st.spinner(f"Running {method_label} forecast..."):
     try:
         forecast_df = forecast(df, periods=int(periods), method=method)
