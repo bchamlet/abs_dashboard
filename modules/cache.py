@@ -168,6 +168,16 @@ class CacheDB:
             )
             conn.commit()
 
+    def catalog_get_by_dataflow(self, dataflow_id: str, version: str) -> dict | None:
+        """Return the catalog entry for a given dataflow/version, or None.
+        Does not filter by expiry — used only to recover the stored date range."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM dataset_catalog WHERE dataflow_id = ? AND version = ? LIMIT 1",
+                (dataflow_id, version),
+            ).fetchone()
+        return dict(row) if row else None
+
     def catalog_list(self) -> list[dict]:
         """Return all catalog entries as a list of dicts, newest first."""
         with self._connect() as conn:

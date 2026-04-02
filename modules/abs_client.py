@@ -271,10 +271,22 @@ def get_observations(
     Cached as a Parquet file for DATA_TTL_HOURS.
     """
     current_year = datetime.now().year
-    if start_period is None:
-        start_period = str(current_year - FETCH_YEARS_DEFAULT)
-    if end_period is None:
-        end_period = str(current_year)
+    if start_period is None and end_period is None:
+        # If the user has previously fetched a wider range for this dataflow
+        # (e.g. extended back to 2015 on the Data tab), use that range so all
+        # pages automatically benefit from the extended data.
+        existing = cache.catalog_get_by_dataflow(dataflow_id, version)
+        if existing:
+            start_period = existing["start_period"]
+            end_period   = existing["end_period"]
+        else:
+            start_period = str(current_year - FETCH_YEARS_DEFAULT)
+            end_period   = str(current_year)
+    else:
+        if start_period is None:
+            start_period = str(current_year - FETCH_YEARS_DEFAULT)
+        if end_period is None:
+            end_period = str(current_year)
 
     cache_key = f"obs:{dataflow_id}:{version}:{start_period}:{end_period}"
 
